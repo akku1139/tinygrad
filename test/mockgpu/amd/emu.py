@@ -60,11 +60,9 @@ from tinygrad.engine.realize import get_runtime
 from tinygrad.codegen import to_program
 
 from tinygrad.renderer.amd import decode_inst
-from tinygrad.runtime.autogen.amd.rdna2.str_pcode import PCODE as PCODE_RDNA2
 from tinygrad.runtime.autogen.amd.rdna3.str_pcode import PCODE as PCODE_RDNA3
 from tinygrad.runtime.autogen.amd.rdna4.str_pcode import PCODE as PCODE_RDNA4
 from tinygrad.runtime.autogen.amd.cdna.str_pcode import PCODE as PCODE_CDNA
-from tinygrad.runtime.autogen.amd.rdna2 import ins as ir2
 from tinygrad.runtime.autogen.amd.rdna3 import ins as ir3
 from tinygrad.runtime.autogen.amd.rdna4 import ins as ir4
 from tinygrad.runtime.autogen.amd.cdna import ins as irc
@@ -180,11 +178,8 @@ _pcode_fixes = {
 }
 
 def _get_pcode_dict(op) -> dict:
-  mod = type(op).__module__
-  if 'cdna' in mod: return PCODE_CDNA
-  if 'rdna4' in mod: return PCODE_RDNA4
-  if 'rdna2' in mod: return PCODE_RDNA2
-  return PCODE_RDNA3
+  """Return the PCODE dictionary for the given opcode based on its architecture."""
+  return PCODE_CDNA if 'cdna' in type(op).__module__ else PCODE_RDNA4 if 'rdna4' in type(op).__module__ else PCODE_RDNA3
 
 # Pcode lookup with hardware errata fixes (the AMD-pdf pcode for these ops is subtly wrong)
 @functools.cache
@@ -1852,7 +1847,7 @@ def _get_runner(inst_bytes: bytes, arch: str = "rdna3"):
   _canonical_runner_cache.append((type(inst), base, mask, size, (prg, runtime)))
   return prg, runtime
 
-_BARRIER_OPS = {ir2.SOPPOp.S_BARRIER, ir3.SOPPOp.S_BARRIER, irc.SOPPOp.S_BARRIER}
+_BARRIER_OPS = {ir3.SOPPOp.S_BARRIER, irc.SOPPOp.S_BARRIER}
 if hasattr(ir4.SOPPOp, 'S_BARRIER_WAIT'): _BARRIER_OPS.add(ir4.SOPPOp.S_BARRIER_WAIT)
 _BARRIER_SOP1_OPS: set = set()
 if hasattr(ir4.SOP1Op, 'S_BARRIER_SIGNAL'): _BARRIER_SOP1_OPS.add(ir4.SOP1Op.S_BARRIER_SIGNAL)
@@ -1983,7 +1978,7 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
     if pc not in program:
       prev_len = len(_canonical_runner_cache)
       (prg, runtime), inst = _decode_at(pc, arch)
-      is_barrier = (isinstance(inst, (ir2.SOPP, ir3.SOPP, ir4.SOPP, irc.SOPP)) and inst.op in _BARRIER_OPS) or \
+      is_barrier = (isinstance(inst, (ir3.SOPP, ir4.SOPP, irc.SOPP)) and inst.op in _BARRIER_OPS) or \
                    (isinstance(inst, (ir4.SOP1,)) and inst.op in _BARRIER_SOP1_OPS)
       program[pc] = (runtime.fxn, prg.arg.globals, is_barrier, inst)
       if DEBUG >= 3:
