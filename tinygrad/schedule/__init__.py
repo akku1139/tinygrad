@@ -30,14 +30,14 @@ def create_schedule(sched_sink:UOp) -> UOp:
     # build kernel dependency graph: edges from producer kernel to consumer kernels
     children: dict[UOp, list[UOp]] = {}
     in_degree: dict[UOp, int] = {}
-    writes: dict[UOp, list[tuple[UOp, UOp, tuple[UOp, ...]]]] = {}  # buffer -> (AFTER, prior state, new kernels)
+    writes: dict[UOp, list[tuple[UOp, tuple[UOp, ...]]]] = {}  # superseded state -> (AFTER, new kernels)
     reads: list[tuple[UOp, UOp, UOp]] = []  # (reader AFTER, reader kernel, buffer state read)
     for u in sched_sink.toposort(gate_kernel_sink):
       if u.op is not Ops.AFTER: continue
       kernels, after_deps = _split_after(u)
       prev_state = _unwrap_src(u.src[0])
       prev_kernels = set(_split_after(prev_state)[0]) if prev_state.op is Ops.AFTER else set()
-      writes.setdefault(u.buf_uop, []).append((u, prev_state, tuple(k for k in kernels if k not in prev_kernels)))
+      writes.setdefault(prev_state, []).append((u, tuple(k for k in kernels if k not in prev_kernels)))
       for k in kernels:
         in_degree.setdefault(k, 0)
         if k.op is Ops.END: assert k.src[0].op is Ops.CALL, f"END src[0] should be KERNEL, not {k.src[0].op}"
@@ -53,8 +53,8 @@ def create_schedule(sched_sink:UOp) -> UOp:
     # WAR deps: a kernel reading buffer state S must run before another write that supersedes S. an AFTER only
     # supersedes its immediate prior state; join members already present in that prior state are ordering deps, not writes
     for u, k, s in reads:
-      for a, prev_state, write_kernels in writes.get(s.buf_uop, []):
-        if a is u or prev_state is not s: continue
+      for a, write_kernels in writes.get(s, []):
+        if a is u: continue
         for t in write_kernels:
           if t is not k and t not in k.backward_slice:
             children.setdefault(k, []).append(t)
@@ -80,6 +80,7 @@ def create_schedule(sched_sink:UOp) -> UOp:
 
 from tinygrad.schedule.memory import memory_plan_rewrite
 from tinygrad.engine.realize import capturing, pm_flatten_linear
+from tinygrad.schedule.prepare import prepare_rangeify
 from tinygrad.schedule.rangeify import get_kernel_graph
 from tinygrad.helpers import CAPTURING
 from tinygrad.uop.ops import PatternMatcher, UPat, ParamArg
@@ -93,7 +94,7 @@ pm_post_sched_cache = PatternMatcher([
   # only resolve buffer PARAMs (slot>=0); ALU/shape vars use slot=-1 and must not be swapped for call args
   (UPat(Ops.PARAM, name="x"), lambda ctx,x: ctx[1][x.arg.slot] if x.arg.slot >= 0 else None),
   # create new BUFFERs
-  (UPat(Ops.BUFFER, src=(UPat(),), name="b"), lambda ctx,b:
+  (UPat(Ops.BUFFER, src=(), name="b"), lambda ctx,b:
    create_new_buffer(ctx, b) if isinstance(b.arg, ParamArg) and b.addrspace is AddrSpace.GLOBAL else None),
 ])
 
@@ -116,14 +117,17 @@ pm_resolve_linear_call = PatternMatcher([
 
 schedule_cache: dict[bytes, UOp] = {}
 # ctx is just for DEBUG on inner
-def lower_sink_to_linear(function:UOp) -> UOp|None:
+def lower_sink_to_linear(call:UOp) -> UOp|None:
+  function = call.src[0]
+  if function.op is not Ops.SINK or isinstance(function.arg, KernelInfo): return None
+  # value calls (with unbound outputs) are inlined positionally during prepare: their bodies are not programs to schedule
+  if call.has_unbound_outputs: return None
   st = time.perf_counter()
-  if isinstance(function.arg, KernelInfo): return None
   cache_key = function.key
   if not SCACHE or (sc_ret:=schedule_cache.get(cache_key, None)) is None:
     if SPEC: type_verify(function, spec_tensor)
     # support recursive CALLs
-    linear = create_schedule(get_kernel_graph(function))
+    linear = create_schedule(get_kernel_graph(prepare_rangeify(function)))
     if SCACHE: schedule_cache[cache_key] = linear
   else:
     # schedule cache hit
@@ -138,10 +142,10 @@ def lower_sink_to_linear(function:UOp) -> UOp|None:
     print(f"scheduled {len(linear.src):5d} kernels in {(time.perf_counter()-st)*1000:8.2f} ms"+\
           f" | {' cache hit' if SCACHE and sc_ret is not None else 'CACHE MISS'} {cache_key.hex()[:8]}"+\
           f" | {len(UOpMetaClass.ucache):7d} uops in cache"+("" if frm is None else f" | {frm.filename}:{frm.lineno}"))
-  return linear
+  return call.replace(src=(linear,)+call.src[1:])
 
 pm_schedule = PatternMatcher([
-  (UPat(Ops.SINK, name="function"), lower_sink_to_linear),
+  (UPat(Ops.CALL, name="call"), lower_sink_to_linear),
 ])
 
 def assert_all_same_devices(ast:UOp):
@@ -156,7 +160,7 @@ def simplify_copy_kernel(call:UOp, ast:UOp, dst:UOp, src:UOp):
   # NOTE: this is a codegen for SDMA devices
   if dst.device == src.device and not (isinstance(dst.device, str) and dst.device.startswith("DISK")): return None
   from tinygrad.codegen.simplify import pm_flatten_range, pm_simplify_ranges
-  from tinygrad.schedule.rangeify import pm_mops
+  from tinygrad.schedule.prepare import pm_mops
   from tinygrad.uop.symbolic import sym
   sink = graph_rewrite(ast, sym+pm_mops+pm_flatten_range+pm_simplify_ranges, ctx={}, name="simplify ranges in copy")
   return call.replace(src=(sink,) + call.src[1:])

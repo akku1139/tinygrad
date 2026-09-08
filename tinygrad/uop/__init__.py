@@ -23,8 +23,8 @@ class Ops(FastEnum):
 
   # uops that aren't rendered
   NOOP = auto(); REWRITE_ERROR = auto()
-  # FUNCTION has a TUPLE body and is gradient-able; CALL is an opaque kernel invocation
-  PARAM = auto(); FUNCTION = auto(); CALL = auto()
+  # CALL is a kernel invocation; calls with RETURNED inputs are value-producing (and gradient-able), the rest are opaque
+  PARAM = auto(); CALL = auto()
 
   # renderer
   # LINEAR is a list of UOps, SOURCE has a str arg that's human readable, BINARY has bytes arg that's compiled
@@ -36,9 +36,6 @@ class Ops(FastEnum):
 
   # vector creation / item selection
   STACK = auto()
-
-  # tuple/gettuple for function with multiple returns
-  TUPLE = auto(); GETTUPLE = auto()
 
   # hcq specific
   GETADDR = auto()
@@ -73,7 +70,7 @@ class Ops(FastEnum):
   # ** 5 -- control flow / consts / custom **
 
   # control flow ops
-  BARRIER = auto(); RANGE = auto(); IF = auto(); END = auto(); ENDIF = auto(); WAIT = auto()
+  BARRIER = auto(); RANGE = auto(); IF = auto(); END = auto(); ENDIF = auto()
 
   # const.
   CONST = auto()

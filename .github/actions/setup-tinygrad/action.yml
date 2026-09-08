@@ -61,6 +61,7 @@ runs:
         echo "MAX_BUFFER_SIZE=300000000" >> "$GITHUB_ENV"
         if [[ "$RUNNER_OS" == "Linux" ]]; then
           echo "VIRTUAL_ENV=/opt/venv/${{ inputs.python-version }}" >> "$GITHUB_ENV"
+          echo "UV_PYTHON_INSTALL_DIR=/opt/python" >> "$GITHUB_ENV"
         else
           echo "VIRTUAL_ENV=${{ github.workspace }}/.venv" >> "$GITHUB_ENV"
         fi
@@ -69,11 +70,6 @@ runs:
       uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
       with:
         enable-cache: 'false' # see below for manual caching
-
-    - name: Set up Python ${{ inputs.python-version }}
-      uses: actions/setup-python@v6
-      with:
-        python-version: ${{ inputs.python-version }}
 
     # **** Caching packages ****
 
@@ -198,21 +194,29 @@ runs:
         echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
         echo "hash=$(echo -n "$pkgs" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
+        installed=true
+        for pkg in $pkgs; do
+          info=$(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' "$pkg" 2> /dev/null || true)
+          echo "${pkg}: ${info:-not in dpkg database}"
+          [[ "$info" == ii* ]] || installed=false
+        done
+        echo "installed=$installed" >> "$GITHUB_OUTPUT"
+
     - name: Cache apt (PR)
-      if: runner.os == 'Linux' && (inputs.opencl == 'true' || inputs.amd == 'true' || inputs.webgpu == 'true' || inputs.llvm == 'true' || inputs.qemu == 'true' || inputs.ninja == 'true') && github.event_name == 'pull_request'
+      if: runner.os == 'Linux' && (inputs.opencl == 'true' || inputs.amd == 'true' || inputs.webgpu == 'true' || inputs.llvm == 'true' || inputs.qemu == 'true' || inputs.ninja == 'true') && github.event_name == 'pull_request' && steps.apt-pkgs.outputs.installed == 'false'
       uses: actions/cache/restore@v5
       with:
         path: /var/cache/apt/archives/
         key: ${{ runner.os }}-${{ runner.arch }}-apt-${{ steps.apt-pkgs.outputs.hash }}-${{ env.CACHE_VERSION }}
     - name: Cache apt
-      if: runner.os == 'Linux' && (inputs.opencl == 'true' || inputs.amd == 'true' || inputs.webgpu == 'true' || inputs.llvm == 'true' || inputs.qemu == 'true' || inputs.ninja == 'true') && github.event_name != 'pull_request'
+      if: runner.os == 'Linux' && (inputs.opencl == 'true' || inputs.amd == 'true' || inputs.webgpu == 'true' || inputs.llvm == 'true' || inputs.qemu == 'true' || inputs.ninja == 'true') && github.event_name != 'pull_request' && steps.apt-pkgs.outputs.installed == 'false'
       uses: actions/cache@v5
       with:
         path: /var/cache/apt/archives/
         key: ${{ runner.os }}-${{ runner.arch }}-apt-${{ steps.apt-pkgs.outputs.hash }}-${{ env.CACHE_VERSION }}
 
     - name: Run apt Update + Install
-      if: runner.os == 'Linux' && (inputs.opencl == 'true' || inputs.amd == 'true' || inputs.webgpu == 'true' || inputs.llvm == 'true' || inputs.qemu == 'true' || inputs.ninja == 'true')
+      if: runner.os == 'Linux' && (inputs.opencl == 'true' || inputs.amd == 'true' || inputs.webgpu == 'true' || inputs.llvm == 'true' || inputs.qemu == 'true' || inputs.ninja == 'true') && steps.apt-pkgs.outputs.installed == 'false'
       shell: bash
       run: |
         sudo apt -qq update || true
@@ -226,9 +230,12 @@ runs:
         sudo chown -R $USER:$USER /var/cache/apt/archives/
 
     - name: Add clang to PATH (Linux)
-      if: inputs.llvm == 'true' && runner.os == 'Linux'
+      if: runner.os == 'Linux'
       shell: bash
-      run: echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
+      run: |
+        if [ -d /usr/lib/llvm-20/bin ]; then
+          echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
+        fi
 
     # **** AMD ****
     - name: Setup AMD (Linux)
