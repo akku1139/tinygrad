@@ -2,7 +2,7 @@ import pathlib, hashlib, re, itertools
 from tinygrad.runtime.autogen import load, root
 
 __all__ = ["am", "pm4_soc15", "pm4_nv", "sdma_4_0_0", "sdma_5_0_0", "sdma_6_0_0", "smu_13_0_0", "smu_13_0_6", "smu_13_0_12", "smu_14_0_2",
-           "fw", "navi_offsets", "vega_offsets", "regs", "soc_9", "soc_11", "soc_12", "pmc"]
+           "fw", "navi_offsets", "vega_offsets", "regs", "soc_9", "soc_10", "soc_11", "soc_12", "pmc"]
 
 am_src="https://github.com/ROCm/ROCK-Kernel-Driver/archive/33970e1351f5e511029602454979f3de7e22260f.tar.gz"
 rocm_src="https://github.com/ROCm/rocm-systems/archive/cccc350dc620e61ae2554978b62ab3532dc10bd9.tar.gz"
@@ -11,12 +11,12 @@ inc, kern_rules = ["-include", "stdint.h"], [(r'le32_to_cpu', ''),]
 fw_src="https://gitlab.com/kernel-firmware/linux-firmware/-/archive/0a6871b19abf5d6e024b5d208b101ae53e7fa0de/0a6871b19abf5d6e024b5d208b101ae53e7fa0de.tar.gz"
 pmc_src="https://raw.githubusercontent.com/ROCm/rocm-systems/cccc350dc620e61ae2554978b62ab3532dc10bd9/projects/rocprofiler-compute/src/rocprof_compute_soc/profile_configs/counter_defs.yaml"
 
-reg_files = {
-  "gc": [(9,4,3), (11,0,0), (11,0,3), (11,5,0), (12,0,0)],
+reg_files: dict[str, list[tuple[int, ...]]] = {
+  "gc": [(9,4,3), (10,3,0), (11,0,0), (11,0,3), (11,5,0), (12,0,0)],
   "mmhub": [(1,8,0), (3,0,0), (3,0,1), (3,0,2), (3,3,0), (4,1,0)],
-  "nbio": [(4,3,0), (7,2,0), (7,7,0), (7,9,0), (7,11,0)], "nbif": [(6,3,1)],
-  "mp": [(11,0,0), (13,0,0), (14,0,2)], "hdp": [(4,4,2), (6,0,0), (7,0,0)],
-  "osssys": [(4,4,2), (6,0,0), (6,1,0), (7,0,0)], "sdma": [(4,4,2)]
+  "nbio": [(2,3,0), (4,3,0), (7,2,0), (7,4), (7,7,0), (7,9,0), (7,11,0)], "nbif": [(6,3,1)],
+  "mp": [(11,0,0), (13,0,0), (14,0,2)], "hdp": [(4,4,2), (5,0,0), (6,0,0), (7,0,0)],
+  "osssys": [(4,4,2), (6,0,0), (6,1,0), (7,0,0)], "sdma": [(4,4,2), (5,0,0)]
 }
 
 reg_patterns = {
@@ -83,12 +83,12 @@ def __getattr__(nm):
 
           regs = {reg: (off, defs[f"{reg}_BASE_IDX"], fields.get(split_name(reg)[1], {})) for reg,off in defs.items() if f"{reg}_BASE_IDX" in defs}
           print(f"defined {len(regs)} registers for {nm}")
-          out.extend([f"{nm} = {{"] + [f"  {k!r}: {v!r}," for k,v in regs.items()] + ["}"])
+          out.extend([f"{nm}: dict = {{"] + [f"  {k!r}: {v!r}," for k,v in regs.items()] + ["}"])
         return "\n".join(out)
       return load("am/regs", [AMDINC + "/asic_reg/" + {"osssys":"oss"}.get(pre, pre) + f"/{pre}_{'_'.join(map(str, ver))}"
                               for pre in reg_files for ver in sorted(reg_files[pre])], srcs=am_src, gen=genreg)
-    case "soc_9" | "soc_11" | "soc_12":
-      return load(f"am/{nm}", ["{}/projects/aqlprofile/linux/" + {9: "vega10", 11: "soc21", 12: "soc24"}[int(nm.split('_')[1])] + "_enum.h"],
+    case "soc_9" | "soc_10" | "soc_11" | "soc_12":
+      return load(f"am/{nm}", ["{}/projects/aqlprofile/linux/" + {9: "vega10", 10: "navi10", 11: "soc21", 12: "soc24"}[int(nm.split('_')[1])] + "_enum.h"],
                   srcs=rocm_src, patterns=soc_patterns, macros=False)
     case "pmc":
       def genpmc(_, files, **kwargs):

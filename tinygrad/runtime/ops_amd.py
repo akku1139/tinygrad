@@ -560,7 +560,10 @@ class AMDAllocator(HCQAllocator['AMDDevice']):
     super().__init__(dev, supports_copy_from_disk=dev.has_copy_queue, supports_transfer=dev.has_copy_queue and not dev.is_usb)
 
   def _alloc(self, size:int, options:BufferSpec) -> HCQBuffer:
-    return self.dev.iface.alloc(size, host=options.host, uncached=options.uncached, cpu_access=options.cpu_access or not self.dev.has_copy_queue)
+    # RDNA2 workaround: if cpu_access is True and not host, force uncached to use GTT
+    if self.dev.target[0] == 10 and options.cpu_access and not options.host:
+      options = BufferSpec(uncached=True, cpu_access=options.cpu_access, host=options.host, nolru=options.nolru, external_ptr=options.external_ptr)
+    return self.dev.iface.alloc(size, host=options.host, uncached=options.uncached, cpu_access=options.cpu_access or not self.dev.has_sdma_queue)
 
   def _do_free(self, opaque, options:BufferSpec): self.dev.iface.free(opaque)
 
@@ -859,7 +862,7 @@ class AMDDevice(HCQ2Compiled):
 
     self.target:tuple[int, ...] = ((trgt:=self.iface.props['gfx_target_version']) // 10000, (trgt // 100) % 100, trgt % 100)
     self.arch = "gfx%d%x%x" % self.target
-    assert (self.target in ((9,4,2),(9,5,0))) or self.target[0] in (11, 12), f"Unsupported arch: {self.arch}"
+    assert (self.target in ((9,4,2),(9,5,0))) or self.target[0] in (10, 11, 12), f"Unsupported arch: {self.arch}"
     if DEBUG >= 1: print(f"AMDDevice: opening {self.device_id} with target {self.target} arch {self.arch}")
 
     self.xccs = self.iface.props.get('num_xcc', 1)
@@ -967,14 +970,15 @@ class AMDDevice(HCQ2Compiled):
     private_segment_size = max(private_segment_size, 128)
 
     lanes_per_wave = 64 # wave64
-    mem_alignment_size = 256 if self.target[0] != 9 else 1024
+    # scratch WAVESIZE unit is 1KB on gfx9/gfx10, 256B on gfx11+ (matches ROCm runtime)
+    mem_alignment_size = 256 if self.target[0] >= 11 else 1024
     size_per_thread = round_up(private_segment_size, mem_alignment_size // lanes_per_wave)
     size_per_xcc = size_per_thread * lanes_per_wave * self.iface.props['max_slots_scratch_cu'] * self.cu_cnt
 
     # NOTE: xcc logic is correct only for GFX9.
     max_scratch_waves = self.cu_cnt * self.iface.props['max_slots_scratch_cu'] * self.xccs
     wave_scratch = ceildiv(lanes_per_wave * size_per_thread, mem_alignment_size)
-    num_waves = (size_per_xcc // (wave_scratch * mem_alignment_size)) // (self.se_cnt if self.target[0] != 9 else 1)
+    num_waves = (size_per_xcc // (wave_scratch * mem_alignment_size)) // (self.se_cnt if self.target[0] >= 11 else 1)
 
     tmpring_t = getattr(hsa, f'union_COMPUTE_TMPRING_SIZE{"_GFX"+str(self.target[0]) if self.target[0] != 9 else ""}_bitfields')
     return int.from_bytes(tmpring_t(WAVES=min(num_waves, max_scratch_waves), WAVESIZE=wave_scratch), 'little')
